@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Process Cleaner every 5 minutes
+Requires=process-cleaner.service
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

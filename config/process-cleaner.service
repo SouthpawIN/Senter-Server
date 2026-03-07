@@ -1,0 +1,13 @@
+[Unit]
+Description=Senter Process Cleaner - Prevents SSH/speak process accumulation
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/sovthpaw/Senter-Server/bin/process-cleaner.sh
+User=sovthpaw
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,612 @@
+#!/bin/bash
+# Senter Server - Unified Model Manager
+# Manages all multimodal models with smart VRAM switching
+# Supports: PEAK (9 models), HIGH (7), MEDIUM (5), BASIC (3), CPU (2)
+#
+# Usage: senter-server {start|stop|status|restart} [model_name]
+#        senter-server start-all
+#        senter-server vram-usage
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE="${HOME}/.senter-server/config/server.conf"
+LOG_DIR="${HOME}/.senter-server/logs"
+MODELS_DIR="${HOME}/.senter-server/models"
+BIN_DIR="$SCRIPT_DIR"
+
+# Default ports (can be overridden in config)
+PORT_LLM=8100
+PORT_IMAGE=8108
+PORT_IMAGE_EDIT=8109
+PORT_TTS=8102
+PORT_ACESTEP=8106
+PORT_LTX=8105
+
+# Load configuration if exists
+if [ -f "$CONFIG_FILE" ]; then
+    source "$CONFIG_FILE"
+fi
+
+# Set paths from config or use defaults
+MODELS_DIR="${MODELS_DIR:-$HOME/.senter-server/models}"
+LOG_DIR="${LOG_DIR:-/tmp/senter-logs}"
+BIN_DIR="${BIN_DIR:-/home/sovthpaw/Senter-Server/bin}"
+TAILSCALE_IP="${TAILSCALE_IP:-100.84.195.22}"
+
+# Ensure directories exist
+mkdir -p "$LOG_DIR"
+
+# Export library path for llama.cpp
+export LD_LIBRARY_PATH="$BIN_DIR:$LD_LIBRARY_PATH"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+log() { echo -e "${BLUE}[Senter-Server]${NC} $1"; }
+success() { echo -e "${GREEN}✓${NC} $1"; }
+error() { echo -e "${RED}✗${NC} $1"; }
+warn() { echo -e "${YELLOW}⚠${NC} $1"; }
+
+# Check if API endpoint is responding
+model_running() {
+    local port=$1
+    curl -s --connect-timeout 2 "http://localhost:$port/v1/models" >/dev/null 2>&1
+}
+
+service_running() {
+    local port=$1
+    local path=${2:-/}
+    curl -s --connect-timeout 2 "http://localhost:$port$path" >/dev/null 2>&1
+}
+
+# Get current model name from API
+get_current_model() {
+    curl -s "http://localhost:$PORT_LLM/v1/models" 2>/dev/null | \
+        python3 -c "import sys,json; print(json.load(sys.stdin)['data'][0]['id'])" 2>/dev/null || echo ""
+}
+
+# Get VRAM usage
+get_vram_usage() {
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        nvidia-smi --query-gpu=name,memory.total,memory.used,memory.free --format=csv,noheader,nounits | while read line; do
+            echo "  $line"
+        done
+    else
+        warn "nvidia-smi not found - cannot check VRAM (CPU-only mode?)"
+    fi
+}
+
+# Start Qwen3.5-35B-A3B with 1M context (YaRN scaling)
+start_qwen35_1m() {
+    log "Starting Qwen3.5-35B-A3B with 1M context..."
+    
+    local model_path="$MODELS_DIR/Qwen3.5-35B-A3B-GGUF/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf"
+    
+    if [ ! -f "$model_path" ]; then
+        error "Model not found: $model_path"
+        error "Run: ./scripts/download-models.sh peak"
+        return 1
+    fi
+    
+    # Kill any existing process on this port
+    fuser -k $PORT_LLM/tcp 2>/dev/null || true
+    sleep 1
+    
+    nohup $BIN_DIR/llama-server \
+        --model "$model_path" \
+        --alias qwen3.5-35b-a3b-1m \
+        --ctx-size 1010000 \
+        --n-gpu-layers -1 \
+        --cache-type-k q4_0 \
+        --cache-type-v q4_0 \
+        --rope-scaling yarn \
+        --rope-scale 4.0 \
+        --yarn-orig-ctx 262144 \
+        --flash-attn on \
+        --threads 16 \
+        --port $PORT_LLM \
+        --host 0.0.0.0 \
+        --jinja \
+        --temp 0.7 \
+        --top-p 0.95 \
+        --repeat-penalty 1.0 \
+        -np 1 -b 512 -ub 256 \
+        --top-k 20 \
+        --presence-penalty 1.5 \
+        > "$LOG_DIR/qwen35-1m.log" 2>&1 &
+    
+    local pid=$!
+    echo $pid > /tmp/senter-qwen35-1m.pid
+    
+    log "PID: $pid"
+    
+    # Wait for startup (up to 60 seconds)
+    for i in {1..60}; do
+        if model_running $PORT_LLM; then
+            success "Qwen3.5-35B-A3B 1M context is ready!"
+            echo "  Local: http://localhost:$PORT_LLM/v1"
+            echo "  TailScale: http://$TAILSCALE_IP:$PORT_LLM/v1"
+            return 0
+        fi
+        sleep 1
+    done
+    
+    error "Failed to start - check $LOG_DIR/qwen35-1m.log"
+    return 1
+}
+
+# Start Qwen3.5-35B-A3B standard (262K context)
+start_qwen35() {
+    log "Starting Qwen3.5-35B-A3B (~80 tok/s)..."
+    
+    local model_path="$MODELS_DIR/Qwen3.5-35B-A3B-GGUF/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf"
+    
+    if [ ! -f "$model_path" ]; then
+        error "Model not found: $model_path"
+        return 1
+    fi
+    
+    fuser -k $PORT_LLM/tcp 2>/dev/null || true
+    sleep 1
+    
+    nohup $BIN_DIR/llama-server \
+        --model "$model_path" \
+        --alias qwen3.5-35b-a3b \
+        --ctx-size 262144 \
+        --n-gpu-layers -1 \
+        --cache-type-k q8_0 \
+        --cache-type-v q8_0 \
+        --flash-attn on \
+        --threads 10 \
+        --port $PORT_LLM \
+        --host 0.0.0.0 \
+        --jinja \
+        --temp 0.7 \
+        --top-p 0.95 \
+        --repeat-penalty 1.0 \
+        -np 1 -b 512 -ub 256 \
+        --top-k 20 \
+        --presence-penalty 1.5 \
+        > "$LOG_DIR/qwen35.log" 2>&1 &
+    
+    log "PID: $!"
+    
+    for i in {1..60}; do
+        if model_running $PORT_LLM; then
+            success "Qwen3.5-35B-A3B is ready (~80 tok/s)!"
+            echo "  Local: http://localhost:$PORT_LLM/v1"
+            echo "  TailScale: http://$TAILSCALE_IP:$PORT_LLM/v1"
+            return 0
+        fi
+        sleep 1
+    done
+    
+    error "Failed to start - check $LOG_DIR/qwen35.log"
+    return 1
+}
+
+# Start Qwen3.5-27B
+start_qwen27() {
+    log "Starting Qwen3.5-27B (Q6_K)..."
+    
+    local model_path="$MODELS_DIR/Qwen3.5-27B-GGUF/Qwen3.5-27B-Q6_K.gguf"
+    
+    if [ ! -f "$model_path" ]; then
+        error "Model not found: $model_path"
+        return 1
+    fi
+    
+    fuser -k $PORT_LLM/tcp 2>/dev/null || true
+    sleep 1
+    
+    nohup $BIN_DIR/llama-server \
+        --model "$model_path" \
+        --alias qwen3.5-27b \
+        --ctx-size 262144 \
+        --n-gpu-layers -1 \
+        --cache-type-k q4_0 \
+        --cache-type-v q4_0 \
+        --flash-attn on \
+        --threads 16 \
+        --port $PORT_LLM \
+        --host 0.0.0.0 \
+        --jinja \
+        --temp 0.7 \
+        --top-p 0.95 \
+        --repeat-penalty 1.0 \
+        -np 1 -b 512 -ub 256 \
+        --top-k 20 \
+        --presence-penalty 1.5 \
+        > "$LOG_DIR/qwen27.log" 2>&1 &
+    
+    log "PID: $!"
+    
+    for i in {1..60}; do
+        if model_running $PORT_LLM; then
+            success "Qwen3.5-27B is ready!"
+            echo "  Local: http://localhost:$PORT_LLM/v1"
+            echo "  TailScale: http://$TAILSCALE_IP:$PORT_LLM/v1"
+            return 0
+        fi
+        sleep 1
+    done
+    
+    error "Failed to start - check $LOG_DIR/qwen27.log"
+    return 1
+}
+
+# Start Qwen2.5-Omni-3B (multimodal)
+start_qwen_omni() {
+    log "Starting Qwen2.5-Omni-3B (multimodal vision/audio)..."
+    
+    local model_path="$MODELS_DIR/Qwen2.5-Omni-3B-GGUF/Qwen2.5-Omni-3B-Q4_K_M.gguf"
+    local mmproj_path="$MODELS_DIR/Qwen2.5-Omni-3B-GGUF/mmproj-Qwen2.5-Omni-3B-Q8_0.gguf"
+    
+    if [ ! -f "$model_path" ] || [ ! -f "$mmproj_path" ]; then
+        error "Omni model files not found"
+        return 1
+    fi
+    
+    fuser -k $PORT_LLM/tcp 2>/dev/null || true
+    sleep 1
+    
+    nohup $BIN_DIR/llama-server \
+        --model "$model_path" \
+        --mmproj "$mmproj_path" \
+        --alias qwen2.5-omni-3b \
+        --ctx-size 8192 \
+        --n-gpu-layers -1 \
+        --flash-attn on \
+        --threads 16 \
+        --port $PORT_LLM \
+        --host 0.0.0.0 \
+        --jinja \
+        --temp 0.7 \
+        --top-p 0.95 \
+        > "$LOG_DIR/qwen-omni.log" 2>&1 &
+    
+    log "PID: $!"
+    
+    for i in {1..30}; do
+        if model_running $PORT_LLM; then
+            success "Qwen2.5-Omni-3B is ready!"
+            echo "  Local: http://localhost:$PORT_LLM/v1"
+            echo "  TailScale: http://$TAILSCALE_IP:$PORT_LLM/v1"
+            return 0
+        fi
+        sleep 1
+    done
+    
+    error "Failed to start - check $LOG_DIR/qwen-omni.log"
+    return 1
+}
+
+# Start Qwen Image Generation server
+start_qwen_image() {
+    log "Starting Qwen Image Generation server..."
+    
+    pkill -f "qwen-image-server.py" 2>/dev/null || true
+    sleep 1
+    
+    cd "$BIN_DIR"
+    nohup python3 qwen-image-server.py > "$LOG_DIR/qwen-image.log" 2>&1 &
+    
+    for i in {1..30}; do
+        if service_running $PORT_IMAGE /v1/health; then
+            success "Qwen Image server is ready!"
+            echo "  Local: http://localhost:$PORT_IMAGE/v1"
+            return 0
+        fi
+        sleep 1
+    done
+    
+    warn "Image server may not have full model support - check logs"
+    return 0
+}
+
+# Start Qwen Image Edit server
+start_qwen_edit() {
+    log "Starting Qwen Image Edit server..."
+    
+    pkill -f "qwen-image-edit-server.py" 2>/dev/null || true
+    sleep 1
+    
+    cd "$BIN_DIR"
+    nohup python3 qwen-image-edit-server.py > "$LOG_DIR/qwen-image-edit.log" 2>&1 &
+    
+    for i in {1..30}; do
+        if service_running $PORT_IMAGE_EDIT /v1/health; then
+            success "Qwen Image Edit server is ready!"
+            echo "  Local: http://localhost:$PORT_IMAGE_EDIT/v1"
+            return 0
+        fi
+        sleep 1
+    done
+    
+    warn "Image edit server may not have full model support - check logs"
+    return 0
+}
+
+# Start LTX-Video (video generation)
+start_ltx() {
+    log "Starting LTX-Video server..."
+    
+    local ltx_dir="$HOME/.senter-server/LTX-Video-original"
+    
+    if [ ! -d "$ltx_dir" ]; then
+        error "LTX-Video not installed. Run: ./scripts/download-models.sh peak"
+        return 1
+    fi
+    
+    pkill -f "python.*inference.py" 2>/dev/null || true
+    sleep 1
+    
+    cd "$ltx_dir"
+    source .venv/bin/activate
+    nohup python3 /home/sovthpaw/Senter-Server/bin/ltxv-server.py > "$LOG_DIR/ltx.log" 2>&1 &
+    
+    for i in {1..30}; do
+        if service_running $PORT_LTX /; then
+            success "LTX-Video is ready!"
+            echo "  Local: http://localhost:$PORT_LTX/"
+            return 0
+        fi
+        sleep 1
+    done
+    
+    warn "LTX-Video may need manual setup - check logs"
+    return 0
+}
+
+# Start AceStep (music generation)
+start_acestep() {
+    log "Starting AceStep music generation server..."
+    
+    pkill -f "acestep-lora-pipeline.py" 2>/dev/null || true
+    sleep 1
+    
+    cd "$BIN_DIR"
+    nohup python3 acestep-lora-pipeline.py --server --port $PORT_ACESTEP \
+        > "$LOG_DIR/acestep.log" 2>&1 &
+    
+    for i in {1..30}; do
+        if service_running $PORT_ACESTEP /v1/health; then
+            success "AceStep is ready!"
+            echo "  Local: http://localhost:$PORT_ACESTEP/v1"
+            return 0
+        fi
+        sleep 1
+    done
+    
+    warn "AceStep placeholder - install full model for music generation"
+    return 0
+}
+
+# Start Soprano TTS
+start_soprano() {
+    log "Starting Soprano TTS server..."
+    
+    pkill -f "soprano.server.*--port $PORT_TTS" 2>/dev/null || true
+    sleep 1
+    
+    cd ~
+    nohup python3 -m soprano.server --host 0.0.0.0 --port $PORT_TTS \
+        > "$LOG_DIR/soprano.log" 2>&1 &
+    
+    for i in {1..30}; do
+        if service_running $PORT_TTS /; then
+            success "Soprano TTS is ready!"
+            echo "  Local: http://localhost:$PORT_TTS/"
+            return 0
+        fi
+        sleep 1
+    done
+    
+    error "Failed to start - check $LOG_DIR/soprano.log"
+    return 1
+}
+
+# Stop all llama-server processes
+stop_all() {
+    log "Stopping all Senter Server services..."
+    
+    pkill -f llama-server 2>/dev/null || true
+    pkill -f qwen-image-server.py 2>/dev/null || true
+    pkill -f qwen-image-edit-server.py 2>/dev/null || true
+    pkill -f soprano.server 2>/dev/null || true
+    pkill -f "python.*inference.py" 2>/dev/null || true
+    pkill -f acestep-lora-pipeline.py 2>/dev/null || true
+    
+    success "All services stopped"
+}
+
+# Show status of all services
+show_status() {
+    echo "=== Senter Server Status ==="
+    echo ""
+    
+    # LLM Port
+    echo "LLM (port $PORT_LLM):"
+    if model_running $PORT_LLM; then
+        local current=$(get_current_model)
+        echo "  Running: $current ✓"
+    else
+        echo "  Not running ✗"
+    fi
+    
+    echo ""
+    echo "Qwen Image (port $PORT_IMAGE):"
+    if service_running $PORT_IMAGE /v1/health; then
+        echo "  Running ✓"
+    else
+        echo "  Not running ✗"
+    fi
+    
+    echo ""
+    echo "Qwen Image Edit (port $PORT_IMAGE_EDIT):"
+    if service_running $PORT_IMAGE_EDIT /v1/health; then
+        echo "  Running ✓"
+    else
+        echo "  Not running ✗"
+    fi
+    
+    echo ""
+    echo "Soprano TTS (port $PORT_TTS):"
+    if service_running $PORT_TTS /; then
+        echo "  Running ✓"
+    else
+        echo "  Not running ✗"
+    fi
+    
+    echo ""
+    echo "AceStep Music (port $PORT_ACESTEP):"
+    if service_running $PORT_ACESTEP /v1/health; then
+        echo "  Running ✓"
+    else
+        echo "  Not running ✗"
+    fi
+    
+    echo ""
+    echo "LTX-Video (port $PORT_LTX):"
+    if service_running $PORT_LTX /; then
+        echo "  Running ✓"
+    else
+        echo "  Not running ✗"
+    fi
+    
+    echo ""
+    echo "=== VRAM Usage ==="
+    get_vram_usage
+    
+    echo ""
+    echo "=== Endpoints ==="
+    echo "  LLM:     http://$TAILSCALE_IP:$PORT_LLM/v1"
+    echo "  Image:   http://$TAILSCALE_IP:$PORT_IMAGE/v1"
+    echo "  Edit:    http://$TAILSCALE_IP:$PORT_IMAGE_EDIT/v1"
+    echo "  TTS:     http://$TAILSCALE_IP:$PORT_TTS/"
+    echo "  Music:   http://$TAILSCALE_IP:$PORT_ACESTEP/v1"
+    echo "  Video:   http://$TAILSCALE_IP:$PORT_LTX/"
+}
+
+# List all available models
+list_models() {
+    echo "=== Available Models ==="
+    echo ""
+    echo "LLM Models (port $PORT_LLM):"
+    echo "  qwen35-1m   - Qwen 3.5 35B-A3B (1M context, YaRN scaling)"
+    echo "  qwen35      - Qwen 3.5 35B-A3B (262K context, ~80 tok/s)"
+    echo "  qwen27      - Qwen 3.5 27B (Q6_K quantization)"
+    echo "  qwen-omni   - Qwen 2.5 Omni 3B (multimodal vision/audio)"
+    echo ""
+    echo "Image Models:"
+    echo "  qwen-image     - Qwen Image Generation (FastAPI server)"
+    echo "  qwen-edit      - Qwen Image Edit (FastAPI server)"
+    echo ""
+    echo "Special Services:"
+    echo "  ltx            - LTX-Video 2B (video generation)"
+    echo "  acestep        - AceStep 1.5 (music generation)"
+    echo "  soprano        - Soprano 80M (TTS service)"
+    echo ""
+    echo "=== Usage ==="
+    echo "  senter-server start <model_name>"
+    echo ""
+    echo "Examples:"
+    echo "  senter-server start qwen35-1m   # 1M context Qwen"
+    echo "  senter-server start qwen-image  # Image generation server"
+    echo "  senter-server status            # Check all endpoints"
+}
+
+# Start all services for profile
+start_all() {
+    log "Starting all Senter Server services..."
+    echo ""
+    
+    # Start in order: TTS first (fastest), then LLMs, then heavy services
+    start_soprano && echo "" || warn "Soprano failed to start"
+    
+    # Try to start main LLM (qwen35 as default)
+    start_qwen35 && echo "" || warn "Qwen35 failed - trying alternatives"
+    
+    success "Core services started!"
+    show_status
+}
+
+# Main command dispatcher
+CMD="${1:-help}"
+MODEL="${2:-}"
+
+case "$CMD" in
+    start)
+        case "${MODEL:-}" in
+            qwen35-1m|qwen-1m|1m) start_qwen35_1m ;;
+            qwen35|qwen-35|35) start_qwen35 ;;
+            qwen27|qwen-27|27) start_qwen27 ;;
+            qwen-omni|omni) start_qwen_omni ;;
+            qwen-image|image) start_qwen_image ;;
+            qwen-edit|edit) start_qwen_edit ;;
+            ltx|video) start_ltx ;;
+            acestep|music) start_acestep ;;
+            soprano|tts) start_soprano ;;
+            all) start_all ;;
+            "") start_all ;;
+            *) error "Unknown model: $MODEL. Run '$0 list' for options" ;;
+        esac
+        ;;
+    
+    stop)
+        case "${MODEL:-all}" in
+            all) stop_all ;;
+            *) stop_all ;;  # Simplified - just stop everything
+        esac
+        ;;
+    
+    restart)
+        stop_all
+        sleep 2
+        case "${MODEL:-all}" in
+            all) start_all ;;
+            *) $0 start "$MODEL" ;;
+        esac
+        ;;
+    
+    status)
+        show_status
+        ;;
+    
+    list)
+        list_models
+        ;;
+    
+    vram|vram-usage)
+        get_vram_usage
+        ;;
+    
+    start-all)
+        start_all
+        ;;
+    
+    stop-all)
+        stop_all
+        ;;
+    
+    *)
+        echo "Senter Server - Unified Model Manager"
+        echo ""
+        echo "Usage: $0 {start|stop|restart|status} [model]"
+        echo "       $0 start-all | stop-all"
+        echo "       $0 list | vram-usage"
+        echo ""
+        echo "Quick commands:"
+        echo "  $0 start-all              # Start all services"
+        echo "  $0 status                 # Check service status"
+        echo "  $0 list                   # List available models"
+        echo "  $0 start qwen35           # Start specific model"
+        echo ""
+        echo "For more info: https://github.com/SouthpawIN/Senter-Server"
+        ;;
+esac

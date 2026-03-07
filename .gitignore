@@ -1,0 +1,41 @@
+# Logs
+*.log
+~/.senter/logs/
+
+# PID files (these are runtime)
+/tmp/senter-pids/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config files with secrets
+~/.senter-config
+~/.ssh/
+
+# Model files (too large for git)
+*.gguf
+*.bin
+safetensors/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
