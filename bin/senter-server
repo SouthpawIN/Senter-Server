@@ -242,8 +242,8 @@ start_qwen27() {
 }
 
 
-# Start Qwen3.5-27B Opus 4.6 Distilled (qwen2746)
-start_qwen2746() {
+# Start Qwen3.5-27B Opus 4.6 Distilled (qwopus)
+start_qwopus() {
     log "Starting Qwen3.5-27B Opus 4.6 Distilled..."
     
     local model_path="$MODELS_DIR/Qwen3.5-27B-Jackrong-Claude-Distilled/Qwen3.5-27B.Jackrong.Claude-Distilled.Q4_K_M.gguf"
@@ -275,7 +275,7 @@ start_qwen2746() {
         -np 1 -b 512 -ub 256 \
         --top-k 20 \
         --presence-penalty 1.5 \
-        > "$LOG_DIR/qwen2746.log" 2>&1 &
+        > "$LOG_DIR/qwopus.log" 2>&1 &
     
     log "PID: $!"
     
@@ -289,7 +289,7 @@ start_qwen2746() {
         sleep 1
     done
     
-    error "Failed to start - check $LOG_DIR/qwen2746.log"
+    error "Failed to start - check $LOG_DIR/qwopus.log"
     return 1
 }
 # Start Qwen2.5-Omni-3B (multimodal)
@@ -553,7 +553,7 @@ list_models() {
     echo "  qwen35-1m   - Qwen 3.5 35B-A3B (1M context, YaRN scaling)"
     echo "  qwen35      - Qwen 3.5 35B-A3B (262K context, ~80 tok/s)"
     echo "  qwen27      - Qwen 3.5 27B (Q6_K quantization)"
-    echo "  qwen2746    - Qwen 3.5 27B Opus 4.6 Distilled (reasoning enhanced)"
+    echo "  qwopus    - Qwen 3.5 27B Opus 4.6 Distilled (reasoning enhanced)"
     echo "  qwen-omni   - Qwen 2.5 Omni 3B (multimodal vision/audio)"
     echo ""
     echo "Image Models:"
@@ -599,7 +599,7 @@ case "$CMD" in
             qwen35-1m|qwen-1m|1m) start_qwen35_1m ;;
             qwen35|qwen-35|35) start_qwen35 ;;
             qwen27|qwen-27|27) start_qwen27 ;;
-            qwen2746|qwen-2746) start_qwen2746 ;;
+            qwopus|qwen-2746) start_qwopus ;;
             qwen-omni|omni) start_qwen_omni ;;
             qwen-image|image) start_qwen_image ;;
             qwen-edit|edit) start_qwen_edit ;;
