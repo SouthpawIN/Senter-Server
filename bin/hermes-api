@@ -1,0 +1,221 @@
+#!/usr/bin/env python3
+"""
+Hermes API Server - REST interface for Hermes reasoning engine
+Runs on senter-server, provides reasoning and phone control APIs
+"""
+
+import json
+import time
+import requests
+from typing import Optional, Dict, Any
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import uvicorn
+
+app = FastAPI(
+    title="Hermes API",
+    description="REST interface for Hermes reasoning and phone control",
+    version="1.0.0"
+)
+
+# Configuration
+LLAMA_SERVER_URL = "http://localhost:8100/v1"
+DEFAULT_MODEL = "qwen3.5-27b-opus46-distilled"  # qwopus
+
+class ReasoningRequest(BaseModel):
+    prompt: str
+    task_type: str = "reasoning"
+    context: Dict[str, Any] = None
+    timeout: int = 60
+    
+class ReasoningResponse(BaseModel):
+    response: str
+    reasoning_steps: list = None
+    confidence: float = 0.0
+    latency_ms: int = 0
+    model: str = DEFAULT_MODEL
+
+class PhoneCameraRequest(BaseModel):
+    camera: str = "back"
+    resolution: str = "high"
+
+class PhoneScreenTap(BaseModel):
+    x: int
+    y: int
+
+class PhoneVisionRequest(BaseModel):
+    image: str  # base64 encoded
+    query: str
+
+
+def call_llama_api(prompt: str, model: str = DEFAULT_MODEL, max_tokens: int = 4096) -> str:
+    """Call the local llama.cpp server for inference"""
+    try:
+        response = requests.post(
+            f"{LLAMA_SERVER_URL}/chat/completions",
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "You are Hermes, an advanced reasoning engine. Provide detailed, step-by-step analysis with verification."},
+                    {"role": "user", "content": prompt}
+                ],
+                "max_tokens": max_tokens,
+                "temperature": 0.7,
+                "stream": False
+            },
+            timeout=120
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            return data["choices"][0]["message"]["content"]
+        else:
+            return f"Error: Llama API returned {response.status_code}"
+            
+    except requests.exceptions.RequestException as e:
+        return f"Error: Failed to connect to llama server - {str(e)}"
+
+
+@app.get("/")
+def root():
+    """Health check"""
+    return {
+        "service": "Hermes API",
+        "status": "running",
+        "version": "1.0.0"
+    }
+
+
+@app.get("/health")
+def health_check():
+    """Detailed health check"""
+    try:
+        # Check llama server
+        response = requests.get(f"{LLAMA_SERVER_URL}/models", timeout=5)
+        llama_status = "ok" if response.status_code == 200 else "error"
+    except:
+        llama_status = "unreachable"
+    
+    return {
+        "status": "healthy",
+        "llama_server": llama_status,
+        "default_model": DEFAULT_MODEL
+    }
+
+
+@app.post("/api/hermes/reason", response_model=ReasoningResponse)
+def hermes_reason(request: ReasoningRequest):
+    """Main reasoning endpoint - sends prompts to qwopus"""
+    start_time = time.time()
+    
+    # Build enhanced prompt with context
+    context_str = json.dumps(request.context, indent=2) if request.context else "{}"
+    
+    full_prompt = f"""You are Hermes, an advanced reasoning engine running on qwopus (Qwen3.5-27B + Opus 4.6 distillation).
+
+TASK TYPE: {request.task_type}
+
+USER REQUEST:
+{request.prompt}
+
+CONTEXT:
+{context_str}
+
+INSTRUCTIONS:
+1. Analyze the request thoroughly
+2. Break down into logical steps
+3. Provide detailed reasoning for each step  
+4. Consider alternatives and edge cases
+5. Verify your solution
+6. Present a clear, actionable response
+
+REASONING:"""
+    
+    # Call llama API
+    response_text = call_llama_api(full_prompt, max_tokens=4096)
+    
+    latency_ms = int((time.time() - start_time) * 1000)
+    
+    return ReasoningResponse(
+        response=response_text,
+        latency_ms=latency_ms,
+        model=DEFAULT_MODEL,
+        confidence=0.85  # Placeholder - would calculate based on response quality
+    )
+
+
+@app.post("/api/hermes/simple")
+def hermes_simple_query(query: str, model: str = DEFAULT_MODEL) -> Dict[str, Any]:
+    """Simple query endpoint for quick responses"""
+    start_time = time.time()
+    
+    prompt = f"Provide a concise answer to: {query}"
+    response_text = call_llama_api(prompt, max_tokens=512)
+    
+    return {
+        "query": query,
+        "response": response_text,
+        "latency_ms": int((time.time() - start_time) * 1000),
+        "model": model
+    }
+
+
+@app.post("/api/phone/camera/capture")
+def phone_camera_capture(request: PhoneCameraRequest) -> Dict[str, Any]:
+    """Capture image from phone camera (via burner-phone on device)"""
+    # This would communicate with the phone agent running on the device
+    # For now, return a placeholder
+    return {
+        "status": "ok",
+        "camera": request.camera,
+        "resolution": request.resolution,
+        "image": "[base64 image data would go here]"
+    }
+
+
+@app.post("/api/phone/screen/tap")
+def phone_screen_tap(request: PhoneScreenTap) -> Dict[str, Any]:
+    """Tap screen at coordinates (via burner-phone on device)"""
+    return {
+        "status": "ok",
+        "action": "tap",
+        "x": request.x,
+        "y": request.y
+    }
+
+
+@app.post("/api/phone/vision/analyze")
+def phone_vision_analyze(request: PhoneVisionRequest) -> Dict[str, Any]:
+    """Analyze image using Qwen Omni vision model"""
+    # This would call qwen-omni for vision analysis
+    return {
+        "status": "ok",
+        "query": request.query,
+        "analysis": "[Vision analysis result]"
+    }
+
+
+@app.get("/api/models")
+def list_models():
+    """List available models"""
+    return {
+        "models": [
+            {"id": "qwen3.5-27b-opus46-distilled", "name": "qwopus", "type": "reasoning"},
+            {"id": "qwen3.5-35b-a3b", "name": "qwen35", "type": "general"},
+            {"id": "qwen2.5-omni-3b", "name": "qwen-omni", "type": "multimodal"},
+        ]
+    }
+
+
+if __name__ == "__main__":
+    print("Starting Hermes API Server...")
+    print(f"LLAMA_SERVER_URL: {LLAMA_SERVER_URL}")
+    print(f"DEFAULT_MODEL: {DEFAULT_MODEL}")
+    print()
+    
+    uvicorn.run(
+        "hermes_api:app",
+        host="0.0.0.0",
+        port=8080,
+        reload=False
+    )

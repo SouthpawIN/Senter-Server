@@ -600,6 +600,7 @@ case "$CMD" in
             qwen35|qwen-35|35) start_qwen35 ;;
             qwen27|qwen-27|27) start_qwen27 ;;
             qwopus|qwen-2746) start_qwopus ;;
+        hermes-api) start_hermes_api ;;
             qwen-omni|omni) start_qwen_omni ;;
             qwen-image|image) start_qwen_image ;;
             qwen-edit|edit) start_qwen_edit ;;
