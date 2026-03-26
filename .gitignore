@@ -39,3 +39,10 @@ safetensors/
 tmp/
 temp/
 *.tmp
+
+# Nested git repositories (submodules should be added separately)
+Builds/llama.cpp-omni
+Builds/llama.cpp-qwen3omni
+Tools/cli/github-share
+Tools/gui/ComfyUI
+Tools/testing/SWE-bench

@@ -1,0 +1,108 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Senter-Server MCP Configuration",
+  "description": "MCP server configuration for exposing model endpoints to Hermes Agent",
+  "version": "1.0.0",
+  
+  "mcpServers": {
+    "senter-model-router": {
+      "command": "python3",
+      "args": [
+        "~/Documents/ObsidianVault/Senter-Server/Source/mcp/model_router.py"
+      ],
+      "cwd": "~/Documents/ObsidianVault/Senter-Server/Source/mcp",
+      "env": {
+        "SENTER_BASE_URL": "http://127.0.0.1:8100",
+        "SENTER_OMNI_URL": "http://127.0.0.1:8101",
+        "SENTER_TTS_URL": "http://127.0.0.1:8102",
+        "SENTER_VIDEO_URL": "http://127.0.0.1:8105",
+        "SENTER_MUSIC_URL": "http://127.0.0.1:8106",
+        "SENTER_IMAGE_GEN_URL": "http://127.0.0.1:8108",
+        "SENTER_IMAGE_EDIT_URL": "http://127.0.0.1:8109"
+      },
+      "timeout": 300,
+      "restartPolicy": "on-failure"
+    }
+  },
+  
+  "toolDefinitions": {
+    "text_models": {
+      "qwen35_1m": {
+        "name": "Qwen3.5-35B-A3B",
+        "description": "High-capability model with 1M context window for long documents",
+        "endpoint": ":8100",
+        "capabilities": ["text-generation", "reasoning", "code-generation"],
+        "context_window": 1000000,
+        "preferred_for": ["analysis", "long-context"]
+      },
+      "qwen35": {
+        "name": "Qwen3.5-35B-A3B",
+        "description": "Balanced model for general reasoning tasks",
+        "endpoint": ":8100",
+        "capabilities": ["text-generation", "reasoning", "code-generation"],
+        "context_window": 262144,
+        "preferred_for": ["conversation", "general"]
+      },
+      "qwen27": {
+        "name": "Qwen3.5-27B",
+        "description": "Faster alternative for text tasks",
+        "endpoint": ":8100",
+        "capabilities": ["text-generation", "reasoning"],
+        "context_window": 262144,
+        "preferred_for": ["fast-response"]
+      }
+    },
+    "vision_models": {
+      "qwen_omni": {
+        "name": "Qwen2.5-Omni-3B",
+        "description": "Multimodal model supporting vision and audio",
+        "endpoint": ":8101",
+        "capabilities": ["vision", "audio-understanding", "multimodal-reasoning"],
+        "context_window": 8192,
+        "input_types": ["image", "audio", "text"]
+      }
+    },
+    "audio_models": {
+      "soprano_tts": {
+        "name": "Soprano 80M",
+        "description": "Text-to-speech synthesis engine",
+        "endpoint": ":8102",
+        "capabilities": ["tts", "voice-synthesis"],
+        "output_format": "wav"
+      }
+    },
+    "generation_models": {
+      "image_generation": {
+        "name": "Qwen Image Generation",
+        "description": "Text-to-image generation service",
+        "endpoint": ":8108",
+        "capabilities": ["image-generation"]
+      },
+      "image_edit": {
+        "name": "Qwen Image Edit",
+        "description": "Image editing and inpainting service",
+        "endpoint": ":8109",
+        "capabilities": ["image-editing", "inpainting", "outpainting"]
+      },
+      "ltx_video": {
+        "name": "LTX-Video",
+        "description": "Text-to-video generation",
+        "endpoint": ":8105",
+        "capabilities": ["video-generation"]
+      },
+      "acestep_music": {
+        "name": "AceStep",
+        "description": "Music and audio generation",
+        "endpoint": ":8106",
+        "capabilities": ["music-generation", "audio-synthesis"]
+      }
+    }
+  },
+  
+  "routingRules": {
+    "autoSelect": true,
+    "fallbackChain": ["qwen35_1m", "qwen35", "qwen27"],
+    "loadBalance": "least-connections",
+    "healthCheckInterval": 30
+  }
+}
